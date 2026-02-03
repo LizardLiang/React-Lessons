@@ -1,5 +1,6 @@
-import { BuggyForm } from './components/BuggyForm'
-import { CorrectForm } from './components/CorrectForm'
+import { FunctionalUpdateBuggyForm } from './components/FunctionalUpdateBuggyForm'
+import { SetFieldValueFixForm } from './components/SetFieldValueFixForm'
+import { BatchedSetValuesForm } from './components/BatchedSetValuesForm'
 
 function App() {
   return (
@@ -14,25 +15,25 @@ function App() {
         }}
       >
         <h1 style={{ margin: 0 }}>
-          Formik setValues Race Condition Bug Demo
+          Formik setValues Race Condition - Context + Multiple Effects
         </h1>
         <p style={{ margin: '10px 0 0', opacity: 0.8 }}>
-          Side-by-side comparison of buggy vs correct implementation
+          Scenario: Multiple context values + nested API calls all using setValues
         </p>
       </div>
 
-      {/* Side-by-side comparison */}
+      {/* Three-column comparison */}
       <div
         style={{
           display: 'flex',
           minHeight: 'calc(100vh - 100px)',
         }}
       >
-        {/* Left: Buggy Form */}
+        {/* Left: Buggy Form (multiple setValues) */}
         <div
           style={{
             flex: 1,
-            borderRight: '3px solid #333',
+            borderRight: '2px solid #333',
             background: '#fff5f5',
             overflow: 'auto',
           }}
@@ -43,19 +44,20 @@ function App() {
               color: '#fff',
               padding: '10px 20px',
               fontWeight: 'bold',
-              fontSize: '1.1em',
+              fontSize: '1em',
               textAlign: 'center',
             }}
           >
-            ❌ BUGGY BEHAVIOR (using setValues)
+            ❌ BUG: Multiple setValues((prev) =&gt; ...)
           </div>
-          <BuggyForm />
+          <FunctionalUpdateBuggyForm />
         </div>
 
-        {/* Right: Correct Form */}
+        {/* Middle: setFieldValue Fix */}
         <div
           style={{
             flex: 1,
+            borderRight: '2px solid #333',
             background: '#f5fff5',
             overflow: 'auto',
           }}
@@ -66,13 +68,36 @@ function App() {
               color: '#fff',
               padding: '10px 20px',
               fontWeight: 'bold',
-              fontSize: '1.1em',
+              fontSize: '1em',
               textAlign: 'center',
             }}
           >
-            ✅ CORRECT SOLUTION (using setFieldValue)
+            ✅ FIX 1: setFieldValue()
           </div>
-          <CorrectForm />
+          <SetFieldValueFixForm />
+        </div>
+
+        {/* Right: Batched setValues Fix */}
+        <div
+          style={{
+            flex: 1,
+            background: '#f5f5ff',
+            overflow: 'auto',
+          }}
+        >
+          <div
+            style={{
+              background: '#1565c0',
+              color: '#fff',
+              padding: '10px 20px',
+              fontWeight: 'bold',
+              fontSize: '1em',
+              textAlign: 'center',
+            }}
+          >
+            ✅ FIX 2: Batched single setValues
+          </div>
+          <BatchedSetValuesForm />
         </div>
       </div>
     </div>

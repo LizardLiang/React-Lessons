@@ -299,9 +299,11 @@ export function BuggyForm() {
 
         <h3>Solution:</h3>
         <p>
-          Use <code>setFieldValue</code> for individual fields, or use a
-          functional update pattern, or merge responses before calling
-          setValues.
+          Use <code>setFieldValue</code> for individual fields.
+          <br />
+          <strong style={{ color: '#c62828' }}>Note:</strong> Functional update{' '}
+          <code>setValues((prev) =&gt; ...)</code> does NOT solve this! See the
+          middle panel for proof.
         </p>
       </div>
 

@@ -8,76 +8,108 @@
 
 ### What is this?
 
-This project demonstrates a common race condition bug when using Formik's `setValues` with concurrent API calls. It provides a side-by-side comparison of the **buggy behavior** and the **correct solution**.
+This project demonstrates a **race condition bug** when using Formik's `setValues` with:
+- Multiple context values that need to sync to form state
+- Nested RxJS subscriptions (or Promise chains)
+- Multiple `useEffect` hooks calling `setValues` concurrently
 
-### The Problem
+It provides a **three-panel comparison** showing the bug and two different fixes.
 
-When multiple API calls update the form state concurrently using `setValues` with spread operator, a stale closure issue occurs:
+### The Problem Scenario
+
+A common pattern in enterprise applications:
+
+1. **Context provides multiple values** (from an API or global state)
+2. **Multiple `useEffect` hooks** sync these context values to Formik
+3. **Nested API calls** also update the form with additional data
 
 ```tsx
-// ❌ BUGGY: Both callbacks capture the SAME initial formik.values
+// Multiple useEffects syncing context values
 useEffect(() => {
-  fetchUserBasicInfo().then((data) => {
-    formik.setValues({
-      ...formik.values,  // Captured at mount time (empty)
-      name: data.name,
-      email: data.email,
-    })
-  })
-}, [])
+  if (configVersion && values.configId !== configVersion) {
+    setValues((prev) => ({ ...prev, configId: configVersion }));
+  }
+}, [configVersion, values.configId, setValues]);
 
 useEffect(() => {
-  fetchUserPreferences().then((data) => {
-    formik.setValues({
-      ...formik.values,  // Also captured at mount time (empty)
-      theme: data.theme,
-      language: data.language,
-    })
-  })
-}, [])
+  if (standard && values.standard !== standard) {
+    setValues((prev) => ({ ...prev, standard }));
+  }
+}, [standard, values.standard, setValues]);
+
+// Nested API subscription
+useEffect(() => {
+  OuterService.getData().subscribe(() => {
+    InnerService.getData().subscribe(() => {
+      // BUG: By now, prev is STALE!
+      setValues((prev) => ({
+        ...prev,  // prev.configId is "" - context values are LOST!
+        unitIds: newUnitIds,
+      }));
+    });
+  });
+}, []);
 ```
 
-**What happens:**
-1. Component mounts, both `useEffect` hooks run
-2. Both callbacks capture the initial empty `formik.values` in their closures
-3. API A returns at ~100ms, sets `{ name, email }` ✓
-4. API B returns at ~150ms, spreads the **stale empty values** and sets `{ theme, language }`
-5. **Result:** `name` and `email` are lost!
+### What Happens (The Bug)
+
+| Time | Event | Result |
+|------|-------|--------|
+| ~50ms | Context ready | Values available |
+| ~50ms | Effects 1-4 run | Each calls `setValues((prev) => ...)` |
+| ~100ms | Outer API returns | Starts inner subscription |
+| ~250ms | Inner API returns | Calls `setValues((prev) => ...)` with **stale `prev`** |
+| Final | | **Context values (configId, standard, etc.) are LOST!** |
 
 ### Why Functional Updates Don't Help
 
-You might think using the functional update pattern would solve this:
+Unlike React's `useState`, Formik's `setValues((prev) => ...)` does **NOT** properly queue concurrent updates:
 
 ```tsx
-// ❌ STILL BUGGY: Functional update doesn't help with Formik
-formik.setValues((prev) => ({
-  ...prev,
-  name: data.name,
-  email: data.email,
-}))
+// ❌ STILL BUGGY - Formik doesn't queue these like useState would
+setValues((prev) => ({ ...prev, configId }));   // Effect 1
+setValues((prev) => ({ ...prev, standard }));    // Effect 2
+setValues((prev) => ({ ...prev, unitIds }));     // Effect 3 (nested API)
+// Each `prev` may capture stale state!
 ```
 
-**Unlike React's `useState`, Formik's `setValues` with functional updates still suffers from the same race condition.** This is because Formik's internal state management doesn't properly queue concurrent functional updates - each update may still read stale state.
+### The Solutions
 
-### The Solution
-
-Use `setFieldValue` instead of `setValues`:
+#### Fix 1: Use `setFieldValue` (Recommended)
 
 ```tsx
-// ✅ CORRECT: setFieldValue doesn't rely on closure-captured state
+// ✅ Each field updated independently - no closure issues
 useEffect(() => {
-  fetchUserBasicInfo().then((data) => {
-    formik.setFieldValue('name', data.name)
-    formik.setFieldValue('email', data.email)
-  })
-}, [])
+  if (configVersion && values.configId !== configVersion) {
+    setFieldValue('configId', configVersion);
+  }
+}, [configVersion, values.configId, setFieldValue]);
 
+// In nested API:
+InnerService.getData().subscribe((data) => {
+  setFieldValue('unitIds', data.unitIds);
+  setFieldValue('parentUnitId', data.parentUnitId);
+});
+```
+
+#### Fix 2: Batch All Updates
+
+```tsx
+// ✅ Wait for all data, then single setValues call
 useEffect(() => {
-  fetchUserPreferences().then((data) => {
-    formik.setFieldValue('theme', data.theme)
-    formik.setFieldValue('language', data.language)
-  })
-}, [])
+  if (contextLoading) return;
+
+  forkJoin({
+    innerData: from(InnerService.getData()),
+  }).subscribe(({ innerData }) => {
+    setValues({
+      configId: configVersion,
+      standard: standard,
+      // ... all context values
+      unitIds: innerData.unitIds,
+    });
+  });
+}, [contextLoading, ...deps]);
 ```
 
 ### Running the Demo
@@ -85,32 +117,44 @@ useEffect(() => {
 ```bash
 # Install dependencies
 npm install
+# or
+bun install
 
 # Start development server
 npm run dev
+# or
+bun dev
 ```
 
-Open your browser and observe:
-- **Left panel (red):** Buggy form - `name` and `email` fields remain empty
-- **Right panel (green):** Correct form - all fields are populated
+Open your browser and observe three panels:
+
+| Panel | Approach | Result |
+|-------|----------|--------|
+| **Left (Red)** | Multiple `setValues((prev) => ...)` | ❌ Context values LOST |
+| **Middle (Green)** | `setFieldValue()` for each field | ✅ All values preserved |
+| **Right (Blue)** | Single batched `setValues` | ✅ All values preserved |
 
 ### Project Structure
 
 ```
 src/
-├── App.tsx                    # Side-by-side comparison layout
+├── App.tsx                           # Three-panel comparison layout
+├── context/
+│   └── UserContext.tsx               # Simulates context with multiple values
 ├── api/
-│   └── mockApi.ts            # Simulated APIs with controlled timing
+│   └── mockApi.ts                    # Mock APIs with controlled timing
 └── components/
-    ├── BuggyForm.tsx         # Demonstrates the bug (setValues)
-    └── CorrectForm.tsx       # Shows the solution (setFieldValue)
+    ├── FunctionalUpdateBuggyForm.tsx # ❌ Shows the bug
+    ├── SetFieldValueFixForm.tsx      # ✅ Fix 1: setFieldValue
+    └── BatchedSetValuesForm.tsx      # ✅ Fix 2: Batched setValues
 ```
 
 ### Key Takeaways
 
-1. **Avoid `setValues` in concurrent async operations** - even functional updates `setValues((prev) => ...)` won't help
-2. **Use `setFieldValue` for individual field updates** - it's the only reliable solution for concurrent updates
-3. **Don't assume Formik behaves like `useState`** - Formik's state management has different semantics
+1. **`setValues((prev) => ...)` is NOT like `useState`** - Formik doesn't properly queue concurrent functional updates
+2. **Use `setFieldValue` for concurrent updates** - It updates each field independently without closure issues
+3. **Multiple `useEffect` + `setValues` = Race condition** - Even with functional updates
+4. **Nested subscriptions make it worse** - The deeper the nesting, the more stale the closure
 
 ---
 
@@ -118,76 +162,108 @@ src/
 
 ### 這是什麼？
 
-這個專案展示了在使用 Formik 的 `setValues` 處理並發 API 請求時常見的競態條件（Race Condition）bug。提供了**錯誤行為**與**正確解法**的並排比較。
+這個專案展示了使用 Formik 的 `setValues` 時發生的**競態條件 bug**，包含：
+- 多個需要同步到表單狀態的 Context 值
+- 巢狀 RxJS subscriptions（或 Promise 鏈）
+- 多個 `useEffect` 同時呼叫 `setValues`
 
-### 問題描述
+提供了**三欄比較**，展示 bug 和兩種不同的修復方式。
 
-當多個 API 呼叫同時使用 `setValues` 搭配展開運算子更新表單狀態時，會發生閉包過期（Stale Closure）的問題：
+### 問題場景
+
+企業應用中常見的模式：
+
+1. **Context 提供多個值**（來自 API 或全域狀態）
+2. **多個 `useEffect`** 將這些 context 值同步到 Formik
+3. **巢狀 API 呼叫**也會更新表單的額外資料
 
 ```tsx
-// ❌ 錯誤寫法：兩個 callback 都捕捉到相同的初始 formik.values
+// 多個 useEffect 同步 context 值
 useEffect(() => {
-  fetchUserBasicInfo().then((data) => {
-    formik.setValues({
-      ...formik.values,  // 在 mount 時捕捉（空值）
-      name: data.name,
-      email: data.email,
-    })
-  })
-}, [])
+  if (configVersion && values.configId !== configVersion) {
+    setValues((prev) => ({ ...prev, configId: configVersion }));
+  }
+}, [configVersion, values.configId, setValues]);
 
 useEffect(() => {
-  fetchUserPreferences().then((data) => {
-    formik.setValues({
-      ...formik.values,  // 同樣在 mount 時捕捉（空值）
-      theme: data.theme,
-      language: data.language,
-    })
-  })
-}, [])
+  if (standard && values.standard !== standard) {
+    setValues((prev) => ({ ...prev, standard }));
+  }
+}, [standard, values.standard, setValues]);
+
+// 巢狀 API subscription
+useEffect(() => {
+  OuterService.getData().subscribe(() => {
+    InnerService.getData().subscribe(() => {
+      // BUG: 此時 prev 已經過期了！
+      setValues((prev) => ({
+        ...prev,  // prev.configId 是 "" - context 值消失了！
+        unitIds: newUnitIds,
+      }));
+    });
+  });
+}, []);
 ```
 
-**發生了什麼：**
-1. 元件掛載，兩個 `useEffect` 同時執行
-2. 兩個 callback 都在閉包中捕捉了初始的空 `formik.values`
-3. API A 在 ~100ms 後回傳，設定 `{ name, email }` ✓
-4. API B 在 ~150ms 後回傳，展開**過期的空值**並設定 `{ theme, language }`
-5. **結果：** `name` 和 `email` 被覆蓋消失了！
+### 發生了什麼（Bug）
+
+| 時間 | 事件 | 結果 |
+|------|------|------|
+| ~50ms | Context 準備好 | 值可用 |
+| ~50ms | Effect 1-4 執行 | 各自呼叫 `setValues((prev) => ...)` |
+| ~100ms | 外層 API 回傳 | 開始內層 subscription |
+| ~250ms | 內層 API 回傳 | 用**過期的 `prev`** 呼叫 `setValues((prev) => ...)` |
+| 最終 | | **Context 值（configId、standard 等）消失了！** |
 
 ### 為什麼函數式更新也沒用
 
-你可能會想用函數式更新來解決這個問題：
+與 React 的 `useState` 不同，Formik 的 `setValues((prev) => ...)` **不會**正確排隊處理並發更新：
 
 ```tsx
-// ❌ 還是有 BUG：函數式更新在 Formik 中無效
-formik.setValues((prev) => ({
-  ...prev,
-  name: data.name,
-  email: data.email,
-}))
+// ❌ 還是有 BUG - Formik 不會像 useState 那樣排隊
+setValues((prev) => ({ ...prev, configId }));   // Effect 1
+setValues((prev) => ({ ...prev, standard }));    // Effect 2
+setValues((prev) => ({ ...prev, unitIds }));     // Effect 3 (巢狀 API)
+// 每個 `prev` 可能都捕捉到過期狀態！
 ```
-
-**與 React 的 `useState` 不同，Formik 的 `setValues` 即使使用函數式更新，仍然會有競態條件問題。** 這是因為 Formik 內部的狀態管理沒有正確地排隊處理並發的函數式更新——每次更新可能仍然讀取到過期的狀態。
 
 ### 解決方案
 
-使用 `setFieldValue` 取代 `setValues`：
+#### 修復 1：使用 `setFieldValue`（推薦）
 
 ```tsx
-// ✅ 正確寫法：setFieldValue 不依賴閉包捕捉的狀態
+// ✅ 每個欄位獨立更新 - 沒有閉包問題
 useEffect(() => {
-  fetchUserBasicInfo().then((data) => {
-    formik.setFieldValue('name', data.name)
-    formik.setFieldValue('email', data.email)
-  })
-}, [])
+  if (configVersion && values.configId !== configVersion) {
+    setFieldValue('configId', configVersion);
+  }
+}, [configVersion, values.configId, setFieldValue]);
 
+// 在巢狀 API 中：
+InnerService.getData().subscribe((data) => {
+  setFieldValue('unitIds', data.unitIds);
+  setFieldValue('parentUnitId', data.parentUnitId);
+});
+```
+
+#### 修復 2：批次更新
+
+```tsx
+// ✅ 等待所有資料，然後單次 setValues
 useEffect(() => {
-  fetchUserPreferences().then((data) => {
-    formik.setFieldValue('theme', data.theme)
-    formik.setFieldValue('language', data.language)
-  })
-}, [])
+  if (contextLoading) return;
+
+  forkJoin({
+    innerData: from(InnerService.getData()),
+  }).subscribe(({ innerData }) => {
+    setValues({
+      configId: configVersion,
+      standard: standard,
+      // ... 所有 context 值
+      unitIds: innerData.unitIds,
+    });
+  });
+}, [contextLoading, ...deps]);
 ```
 
 ### 執行示範
@@ -195,32 +271,44 @@ useEffect(() => {
 ```bash
 # 安裝依賴
 npm install
+# 或
+bun install
 
 # 啟動開發伺服器
 npm run dev
+# 或
+bun dev
 ```
 
-打開瀏覽器觀察：
-- **左側面板（紅色）：** 有 bug 的表單 - `name` 和 `email` 欄位保持空白
-- **右側面板（綠色）：** 正確的表單 - 所有欄位都有值
+打開瀏覽器觀察三個面板：
+
+| 面板 | 方式 | 結果 |
+|------|------|------|
+| **左側（紅色）** | 多個 `setValues((prev) => ...)` | ❌ Context 值消失 |
+| **中間（綠色）** | 每個欄位用 `setFieldValue()` | ✅ 所有值保留 |
+| **右側（藍色）** | 單次批次 `setValues` | ✅ 所有值保留 |
 
 ### 專案結構
 
 ```
 src/
-├── App.tsx                    # 並排比較佈局
+├── App.tsx                           # 三欄比較佈局
+├── context/
+│   └── UserContext.tsx               # 模擬有多個值的 context
 ├── api/
-│   └── mockApi.ts            # 模擬 API（有控制時間差）
+│   └── mockApi.ts                    # 有控制時間的模擬 API
 └── components/
-    ├── BuggyForm.tsx         # 展示 bug（使用 setValues）
-    └── CorrectForm.tsx       # 展示解法（使用 setFieldValue）
+    ├── FunctionalUpdateBuggyForm.tsx # ❌ 展示 bug
+    ├── SetFieldValueFixForm.tsx      # ✅ 修復 1: setFieldValue
+    └── BatchedSetValuesForm.tsx      # ✅ 修復 2: 批次 setValues
 ```
 
 ### 重點整理
 
-1. **避免在並發非同步操作中使用 `setValues`** - 即使函數式更新 `setValues((prev) => ...)` 也無法解決問題
-2. **使用 `setFieldValue` 更新個別欄位** - 這是處理並發更新的唯一可靠解法
-3. **不要假設 Formik 的行為與 `useState` 相同** - Formik 的狀態管理有不同的語意
+1. **`setValues((prev) => ...)` 不等於 `useState`** - Formik 不會正確排隊處理並發的函數式更新
+2. **並發更新請用 `setFieldValue`** - 它獨立更新每個欄位，沒有閉包問題
+3. **多個 `useEffect` + `setValues` = 競態條件** - 即使用函數式更新也一樣
+4. **巢狀 subscription 會讓問題更嚴重** - 巢狀越深，閉包越過期
 
 ---
 
